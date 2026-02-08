@@ -1,0 +1,40 @@
+{
+  "name": "agent-wars",
+  "version": "1.0.0",
+  "description": "Multi-agent security testing tool - Red Team vs Blue Team with Green Team referee",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-wars": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "keywords": [
+    "security",
+    "penetration-testing",
+    "claude",
+    "ai-agents",
+    "red-team",
+    "blue-team",
+    "vulnerability-scanner"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.34",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "ora": "^8.2.0",
+    "uuid": "^11.1.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
