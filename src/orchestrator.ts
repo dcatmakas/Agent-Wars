@@ -1,5 +1,6 @@
 import { query, type SDKMessage, type Options } from '@anthropic-ai/claude-agent-sdk';
 import path from 'path';
+import readline from 'readline';
 import { redAgent } from './agents/red.js';
 import { blueAgent } from './agents/blue.js';
 import type {
@@ -23,6 +24,9 @@ import {
   stopSpinner,
   printVulnerabilityTable,
 } from './utils/logger.js';
+import chalk from 'chalk';
+
+// ─── JSON PARSING ───
 
 function parseJsonFromText(text: string): unknown | null {
   // Try to extract JSON from markdown code blocks first
@@ -60,29 +64,26 @@ function parseJsonFromText(text: string): unknown | null {
   return null;
 }
 
+// ─── MESSAGE EXTRACTION ───
+
 function extractResultText(messages: SDKMessage[]): string {
-  // Collect ALL text from all messages - result, assistant, and subagent outputs
   const allTexts: string[] = [];
 
   for (const msg of messages) {
-    // Final result
     if (msg.type === 'result' && msg.subtype === 'success') {
       const resultText = (msg as any).result ?? '';
       if (resultText) allTexts.push(resultText);
     }
-    // Assistant messages (including Green Agent relaying subagent output)
     if (msg.type === 'assistant' && msg.message?.content) {
       for (const block of msg.message.content as any[]) {
         if (block.type === 'text' && block.text) {
           allTexts.push(block.text);
         }
-        // Also check tool_result blocks that might contain subagent output
         if (block.type === 'tool_result' && typeof block.content === 'string') {
           allTexts.push(block.content);
         }
       }
     }
-    // User messages might contain tool results from subagents
     if (msg.type === 'user' && msg.message?.content) {
       const content = (msg as any).message.content;
       if (Array.isArray(content)) {
@@ -104,6 +105,8 @@ function extractResultText(messages: SDKMessage[]): string {
 
   return allTexts.join('\n');
 }
+
+// ─── AGENT RUNNER ───
 
 async function runAgent(
   prompt: string,
@@ -132,6 +135,42 @@ async function runAgent(
   const resultText = extractResultText(messages);
   return { messages, resultText, costUsd };
 }
+
+// ─── USER CONFIRMATION ───
+
+type FixApproval = 'all' | 'critical-high' | 'skip';
+
+async function askUserApproval(vulns: Vulnerability[]): Promise<FixApproval> {
+  const criticalCount = vulns.filter((v) => v.severity === 'critical').length;
+  const highCount = vulns.filter((v) => v.severity === 'high').length;
+  const mediumCount = vulns.filter((v) => v.severity === 'medium').length;
+  const lowCount = vulns.filter((v) => v.severity === 'low').length;
+  const infoCount = vulns.filter((v) => v.severity === 'info').length;
+
+  console.log();
+  console.log(chalk.yellow.bold('  Blue Agent is ready to apply fixes.'));
+  console.log(chalk.gray(`  Vulnerabilities to fix: ${chalk.red.bold(String(criticalCount))} critical, ${chalk.hex('#ff6600').bold(String(highCount))} high, ${chalk.yellow.bold(String(mediumCount))} medium, ${chalk.cyan.bold(String(lowCount))} low, ${chalk.gray.bold(String(infoCount))} info`));
+  console.log();
+  console.log(chalk.white('  What would you like to do?'));
+  console.log(chalk.green('    [1]') + chalk.white(' Fix all vulnerabilities'));
+  console.log(chalk.yellow('    [2]') + chalk.white(' Fix only critical & high severity'));
+  console.log(chalk.red('    [3]') + chalk.white(' Skip fixes (report only)'));
+  console.log();
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  return new Promise((resolve) => {
+    rl.question(chalk.cyan('  Your choice (1/2/3): '), (answer) => {
+      rl.close();
+      const trimmed = answer.trim();
+      if (trimmed === '2') resolve('critical-high');
+      else if (trimmed === '3') resolve('skip');
+      else resolve('all');
+    });
+  });
+}
+
+// ─── MAIN SCAN ───
 
 export async function runScan(options: ScanOptions): Promise<SecurityReport> {
   const startTime = Date.now();
@@ -172,83 +211,9 @@ CRITICAL RULES:
     logPhase(`ROUND ${round}/${options.maxIterations}`, 'Red Agent - Vulnerability Scan');
     const redSpinner = startSpinner('Red Agent analyzing project for vulnerabilities...');
 
-    const previousFindings = allVulnerabilities
-      .filter((v) => !allFixes.some((f) => f.vulnerabilityId === v.id && f.verified))
-      .map((v) => v.id)
-      .join(', ');
-
-    const redPrompt =
-      round === 1
-        ? `Invoke the red-agent subagent with the following prompt:
-
-"Perform a FULL offensive security assessment of the project at ${options.target}. You MUST do ALL of the following steps:
-
-STEP 1 - RECONNAISSANCE:
-- Read package.json, requirements.txt, or equivalent to understand the tech stack
-- Use Glob to map the full project structure
-- Identify the framework (Express, Next.js, Django, Flask, FastAPI, Spring, etc.)
-- Find all entry points (routes, controllers, API endpoints)
-
-STEP 2 - STATIC ANALYSIS:
-- Use Grep to search for hardcoded secrets: passwords, API keys, tokens, connection strings
-  Patterns: 'password\\s*=', 'secret', 'api_key', 'token', 'AWS_', 'PRIVATE_KEY', 'connectionString'
-- Search for dangerous functions: eval, exec, innerHTML, dangerouslySetInnerHTML, child_process, subprocess
-- Search for SQL queries built with string concatenation
-- Check .env files, config files for sensitive data
-- Check .gitignore to see if sensitive files are excluded
-
-STEP 3 - DEPENDENCY AUDIT:
-- Run 'npm audit' or 'pip audit' or equivalent
-- Check for known vulnerable package versions
-
-STEP 4 - OWASP TOP 10 ANALYSIS:
-- Check every route handler for input validation
-- Look for SQL/NoSQL injection points
-- Look for XSS vulnerabilities (unescaped user input in responses)
-- Check authentication implementation (password hashing, session management, JWT handling)
-- Check authorization (are routes protected? is there role-based access?)
-- Look for CSRF protection
-- Check CORS configuration
-- Look for path traversal vulnerabilities
-- Check for SSRF possibilities
-- Check security headers (helmet, CSP, X-Frame-Options)
-
-STEP 5 - INFRASTRUCTURE:
-- Check Dockerfile if present (running as root? secrets in build?)
-- Check docker-compose.yml for exposed ports, default passwords
-- Check for .env files with real credentials committed
-
-STEP 6 - ACTIVE TESTING (if possible):
-- Try to start the project locally with 'npm start' or equivalent
-- If it starts, use curl to test endpoints for injection, auth bypass, etc.
-- Test rate limiting on login/auth endpoints
-
-You MUST find at least something - no project is 100% secure. Even if the code looks clean, check for:
-- Missing rate limiting
-- Missing security headers
-- Overly permissive CORS
-- Missing input validation on any endpoint
-- Dependencies with known CVEs
-- Missing HTTPS enforcement
-- Weak password requirements
-- Missing logging/monitoring
-
-Output your findings as a JSON array in a \`\`\`json code block."
-
-After the red-agent completes, copy its COMPLETE JSON output into your response verbatim.`
-        : `Invoke the red-agent subagent with the following prompt:
-
-"Re-scan the project at ${options.target}. Previous vulnerabilities that were supposedly fixed: ${previousFindings}.
-
-You must:
-1. Verify each previous fix is actually correct and complete
-2. Check if any fixes introduced NEW vulnerabilities
-3. Look for any vulnerabilities missed in the first scan
-4. Try to bypass the fixes that were applied
-
-Output your findings as a JSON array in a \`\`\`json code block. Include ONLY vulnerabilities that still exist (not fixed ones)."
-
-After the red-agent completes, copy its COMPLETE JSON output into your response verbatim.`;
+    const redPrompt = round === 1
+      ? buildFirstRoundRedPrompt(options.target)
+      : buildVerifyRedPrompt(options.target, allFixes);
 
     try {
       const redResult = await runAgent(redPrompt, baseOptions);
@@ -264,7 +229,7 @@ After the red-agent completes, copy its COMPLETE JSON output into your response 
           }))
         : [];
 
-      // Deduplicate - don't add if same title+file already exists
+      // Deduplicate
       const newVulns = foundVulns.filter(
         (v) =>
           !allVulnerabilities.some(
@@ -293,7 +258,7 @@ After the red-agent completes, copy its COMPLETE JSON output into your response 
         remainingIssues: currentUnfixed.length,
       });
 
-      // If no vulnerabilities found and not first round, we're done
+      // If no new/remaining vulnerabilities, we're done
       if (currentUnfixed.length === 0 && round > 1) {
         logGreen('All vulnerabilities have been resolved! Ending scan.');
         break;
@@ -304,16 +269,43 @@ After the red-agent completes, copy its COMPLETE JSON output into your response 
         break;
       }
 
-      // ─── PHASE 2: BLUE AGENT DEFENSE ───
+      // ─── PHASE 2: BLUE AGENT DEFENSE (with user approval) ───
       if (!options.fix) {
         logGreen('Fix mode disabled (--no-fix). Skipping Blue Agent phase.');
         continue;
       }
 
-      logPhase(`ROUND ${round}/${options.maxIterations}`, 'Blue Agent - Applying Fixes');
+      // Ask user for approval before applying fixes
+      stopSpinner();
+      const approval = await askUserApproval(currentUnfixed);
+
+      if (approval === 'skip') {
+        logGreen('User skipped fixes. Moving to next round...');
+        iterations.push({
+          round,
+          phase: 'blue',
+          vulnerabilitiesFound: 0,
+          fixesApplied: 0,
+          remainingIssues: currentUnfixed.length,
+        });
+        continue;
+      }
+
+      // Filter vulnerabilities based on user choice
+      const vulnsToFix =
+        approval === 'critical-high'
+          ? currentUnfixed.filter((v) => v.severity === 'critical' || v.severity === 'high')
+          : currentUnfixed;
+
+      if (vulnsToFix.length === 0) {
+        logGreen('No vulnerabilities matching the selected severity. Skipping fixes.');
+        continue;
+      }
+
+      logPhase(`ROUND ${round}/${options.maxIterations}`, `Blue Agent - Fixing ${vulnsToFix.length} vulnerabilities`);
       const blueSpinner = startSpinner('Blue Agent fixing vulnerabilities...');
 
-      const vulnsForBlue = currentUnfixed
+      const vulnsForBlue = vulnsToFix
         .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 4) - (SEVERITY_ORDER[b.severity] ?? 4))
         .map((v) => ({
           id: v.id,
@@ -388,7 +380,7 @@ After the blue-agent completes, copy its COMPLETE JSON output into your response
 
   stopSpinner();
 
-  // ─── PHASE 3: GREEN AGENT - GENERATE REPORT ───
+  // ─── PHASE 3: GENERATE REPORT ───
   logPhase('FINAL', 'Green Agent - Generating Security Report');
 
   const unfixed = allVulnerabilities.filter(
@@ -407,10 +399,7 @@ After the blue-agent completes, copy its COMPLETE JSON output into your response
     summary[v.severity] = (summary[v.severity] || 0) + 1;
   }
 
-  // Calculate security score
   const score = calculateScore(allVulnerabilities, allFixes);
-
-  // Generate recommendations
   const recommendations = generateRecommendations(unfixed);
 
   const report: SecurityReport = {
@@ -433,6 +422,103 @@ After the blue-agent completes, copy its COMPLETE JSON output into your response
 
   return report;
 }
+
+// ─── RED AGENT PROMPTS ───
+
+function buildFirstRoundRedPrompt(target: string): string {
+  return `Invoke the red-agent subagent with the following prompt:
+
+"Perform a FULL offensive security assessment of the project at ${target}. You MUST do ALL of the following steps:
+
+STEP 1 - RECONNAISSANCE:
+- Read package.json, requirements.txt, or equivalent to understand the tech stack
+- Use Glob to map the full project structure
+- Identify the framework (Express, Next.js, Django, Flask, FastAPI, Spring, ASP.NET, etc.)
+- Find all entry points (routes, controllers, API endpoints)
+
+STEP 2 - STATIC ANALYSIS:
+- Use Grep to search for hardcoded secrets: passwords, API keys, tokens, connection strings
+  Patterns: 'password\\s*=', 'secret', 'api_key', 'token', 'AWS_', 'PRIVATE_KEY', 'connectionString'
+- Search for dangerous functions: eval, exec, innerHTML, dangerouslySetInnerHTML, child_process, subprocess
+- Search for SQL queries built with string concatenation
+- Check .env files, config files for sensitive data
+- Check .gitignore to see if sensitive files are excluded
+
+STEP 3 - DEPENDENCY AUDIT:
+- Run 'npm audit' or 'pip audit' or 'dotnet list package --vulnerable' or equivalent
+- Check for known vulnerable package versions
+
+STEP 4 - OWASP TOP 10 ANALYSIS:
+- Check every route handler for input validation
+- Look for SQL/NoSQL injection points
+- Look for XSS vulnerabilities (unescaped user input in responses)
+- Check authentication implementation (password hashing, session management, JWT handling)
+- Check authorization (are routes protected? is there role-based access?)
+- Look for CSRF protection
+- Check CORS configuration
+- Look for path traversal vulnerabilities
+- Check for SSRF possibilities
+- Check security headers (helmet, CSP, X-Frame-Options)
+
+STEP 5 - INFRASTRUCTURE:
+- Check Dockerfile if present (running as root? secrets in build?)
+- Check docker-compose.yml for exposed ports, default passwords
+- Check for .env files with real credentials committed
+
+STEP 6 - ACTIVE TESTING (if possible):
+- Try to start the project locally with 'npm start' or equivalent
+- If it starts, use curl to test endpoints for injection, auth bypass, etc.
+- Test rate limiting on login/auth endpoints
+
+You MUST find at least something - no project is 100% secure. Even if the code looks clean, check for:
+- Missing rate limiting
+- Missing security headers
+- Overly permissive CORS
+- Missing input validation on any endpoint
+- Dependencies with known CVEs
+- Missing HTTPS enforcement
+- Weak password requirements
+- Missing logging/monitoring
+
+Output your findings as a JSON array in a \`\`\`json code block."
+
+After the red-agent completes, copy its COMPLETE JSON output into your response verbatim.`;
+}
+
+function buildVerifyRedPrompt(target: string, fixes: Fix[]): string {
+  const fixSummary = fixes
+    .map((f) => `- ${f.vulnerabilityId} in ${f.file}: ${f.description}`)
+    .join('\n');
+
+  return `Invoke the red-agent subagent with the following prompt:
+
+"The Blue Agent applied the following fixes to the project at ${target}. Your job is to VERIFY these fixes are correct and complete. Do NOT scan the entire project from scratch.
+
+FIXES APPLIED:
+${fixSummary}
+
+For EACH fix above:
+1. Read the modified file and check if the fix is actually correct
+2. Try to bypass the fix - can you still exploit the vulnerability?
+3. Check if the fix introduced any NEW security issues (e.g., breaking auth, new injection points)
+4. Verify the fix follows security best practices
+
+ALSO check:
+- Did any fix break existing functionality?
+- Were there any side effects from the changes?
+
+Output a JSON array of ONLY vulnerabilities that:
+- Were NOT properly fixed (fix is incomplete or wrong)
+- Were NEWLY introduced by the fixes
+- Do NOT report vulnerabilities that were successfully fixed
+
+If all fixes are correct and complete, output an empty array: \`\`\`json\n[]\n\`\`\`
+Output your findings in a \`\`\`json code block."
+
+After the red-agent completes, copy its COMPLETE JSON output into your response verbatim.`;
+}
+
+// ─── SCORING ───
 
 function calculateScore(vulns: Vulnerability[], fixes: Fix[]): number {
   if (vulns.length === 0) return 100;
@@ -460,6 +546,8 @@ function calculateScore(vulns: Vulnerability[], fixes: Fix[]): number {
   const score = Math.max(0, Math.round(100 - remainingPenalty));
   return Math.min(100, score);
 }
+
+// ─── RECOMMENDATIONS ───
 
 function generateRecommendations(unfixed: Vulnerability[]): string[] {
   const recs: string[] = [];
