@@ -11,25 +11,46 @@ Built with Claude Agent SDK.
 ## Requirements
 
 - Node.js 18+
-- `ANTHROPIC_API_KEY` environment variable set
+- An [Anthropic API key](https://console.anthropic.com/)
 
-## Install
+## Quick Start
+
+Run instantly without installing:
+
+```bash
+export ANTHROPIC_API_KEY=your-key-here
+npx agent-wars scan -t ./your-project
+```
+
+## Installation
 
 ```bash
 npm install -g agent-wars
 ```
 
+Then use it anywhere:
+
+```bash
+agent-wars scan -t ./your-project
+```
+
 ## Usage
 
 ```bash
-# Scan a project
+# Basic scan
 agent-wars scan -t ./my-project
 
-# Scan with options
-agent-wars scan -t ./my-project -o ./report -i 5 --no-fix
+# Scan without auto-fix
+agent-wars scan -t ./my-project --no-fix
 
-# Use a specific model
-agent-wars scan -t ./my-project -m claude-sonnet-4-5-20250929
+# Custom output directory and more iterations
+agent-wars scan -t ./my-project -o ./report -i 5
+
+# Use a specific model with higher budget
+agent-wars scan -t ./my-project -m claude-sonnet-4-5-20250929 -b 10
+
+# Verbose output
+agent-wars scan -t ./my-project -v
 ```
 
 ## Options
