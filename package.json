@@ -1,16 +1,22 @@
 {
   "name": "agent-wars",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Multi-agent security testing tool - Red Team vs Blue Team with Green Team referee",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "agent-wars": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "security",
